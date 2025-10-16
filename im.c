@@ -93,8 +93,15 @@ static void im_handle_key(struct wlpinyin_state *state,
 		}
 
 		if (!handled && keynode->pressed) {
+			xkb_mod_mask_t mods = 0;
+			if (xkb_state_mod_name_is_active(state->xkb_state, XKB_MOD_NAME_CTRL, XKB_STATE_MODS_EFFECTIVE) == 1)
+				mods |= xkb_keymap_mod_get_mask(state->xkb_keymap, XKB_MOD_NAME_CTRL);
+			if (xkb_state_mod_name_is_active(state->xkb_state, XKB_MOD_NAME_ALT, XKB_STATE_MODS_EFFECTIVE) == 1)
+				mods |= xkb_keymap_mod_get_mask(state->xkb_keymap, XKB_MOD_NAME_ALT);
+			if (xkb_state_mod_name_is_active(state->xkb_state, XKB_MOD_NAME_SHIFT, XKB_STATE_MODS_EFFECTIVE) == 1)
+				mods |= xkb_keymap_mod_get_mask(state->xkb_keymap, XKB_MOD_NAME_SHIFT);
 			handled =
-					im_engine_key(state->engine, keynode->xkb_keysym, 0);
+					im_engine_key(state->engine, keynode->xkb_keysym, mods);
 		}
 
 		if (handled) {
