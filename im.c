@@ -94,10 +94,7 @@ static void im_handle_key(struct wlpinyin_state *state,
 
 		if (!handled && keynode->pressed) {
 			handled =
-					im_engine_key(state->engine, keynode->xkb_keysym,
-												xkb_state_serialize_mods(
-														state->xkb_state, XKB_STATE_MODS_EFFECTIVE |
-																									XKB_STATE_LAYOUT_EFFECTIVE));
+					im_engine_key(state->engine, keynode->xkb_keysym, 0);
 		}
 
 		if (handled) {

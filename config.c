@@ -8,6 +8,6 @@ bool im_toggle(struct xkb_state *xkb, xkb_keysym_t keysym, bool pressed) {
 	wlpinyin_dbg("toggle %d, %d, %s", records[0], records[1],
 							 pressed ? "pressed" : "release");
 #endif
-	return pressed == false && records[0] == XKB_KEY_Control_L &&
-				 records[1] == XKB_KEY_Control_L;
+	return pressed == false && records[0] == XKB_KEY_Shift_L &&
+				 records[1] == XKB_KEY_Shift_L;
 }
