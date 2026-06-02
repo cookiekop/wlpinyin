@@ -56,10 +56,7 @@ static void im_engine_update_context(rime_engine *engine) {
 								 context.menu.highlighted_candidate_index);
 
 		// Copy preedit
-		if (engine->preedit.text) {
-			free(engine->preedit.text);
-			engine->preedit.text = NULL;
-		}
+		im_preedit_clear(&engine->preedit);
 		engine->preedit.text =
 				strdup(context.composition.preedit ? context.composition.preedit : "");
 		engine->preedit.begin = context.composition.sel_start;
@@ -71,6 +68,9 @@ static void im_engine_update_context(rime_engine *engine) {
 		engine->ctx.highlighted_index = context.menu.highlighted_candidate_index;
 
 		api->free_context(&context);
+	} else {
+		im_preedit_clear(&engine->preedit);
+		im_context_clear(&engine->ctx);
 	}
 }
 
@@ -198,6 +198,7 @@ const char *im_engine_commit(struct engine *engine) {
 bool im_engine_key(rime_engine *engine,
 									 xkb_keysym_t keycode,
 									 xkb_mod_mask_t mods) {
+	mods = im_rime_filter_mods(mods);
 	bool handled = engine->api->process_key(engine->sess, keycode, mods);
 	if (handled)
 		im_engine_update_context(engine);
@@ -216,6 +217,11 @@ void im_engine_reset(rime_engine *engine) {
 
 bool im_engine_get_ascii_mode(rime_engine *engine) {
 	return engine->api->get_option(engine->sess, "ascii_mode");
+}
+
+bool im_engine_has_input(rime_engine *engine) {
+	const char *input = engine->api->get_input(engine->sess);
+	return input && input[0] != '\0';
 }
 
 void im_engine_set_ascii_mode(rime_engine *engine, bool ascii_mode) {

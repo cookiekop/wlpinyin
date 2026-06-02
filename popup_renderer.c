@@ -2,6 +2,7 @@
 
 #include <cairo.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/mman.h>
@@ -20,6 +21,58 @@
 #define MAX_FWD_ROWS 5
 
 static int DEFAULT_SHM_SIZE = 4096;
+
+static void popup_apply_scale(struct wlpinyin_state *state, int scale) {
+	scale = im_popup_effective_scale(scale);
+	if (state->popup_scale == scale)
+		return;
+
+	state->popup_scale = scale;
+	state->pending_render = true;
+	if (state->frame_callback_done && state->engine)
+		im_panel_update(state);
+}
+
+static void popup_surface_enter(void *data,
+																struct wl_surface *wl_surface,
+																struct wl_output *output) {
+	UNUSED(data);
+	UNUSED(wl_surface);
+	UNUSED(output);
+}
+
+static void popup_surface_leave(void *data,
+																struct wl_surface *wl_surface,
+																struct wl_output *output) {
+	UNUSED(data);
+	UNUSED(wl_surface);
+	UNUSED(output);
+}
+
+static void popup_surface_preferred_buffer_scale(void *data,
+																								 struct wl_surface *wl_surface,
+																								 int32_t factor) {
+	UNUSED(wl_surface);
+
+	struct wlpinyin_state *state = data;
+	popup_apply_scale(state, factor);
+}
+
+static void popup_surface_preferred_buffer_transform(
+		void *data,
+		struct wl_surface *wl_surface,
+		uint32_t transform) {
+	UNUSED(data);
+	UNUSED(wl_surface);
+	UNUSED(transform);
+}
+
+static const struct wl_surface_listener popup_surface_listener = {
+		.enter = popup_surface_enter,
+		.leave = popup_surface_leave,
+		.preferred_buffer_scale = popup_surface_preferred_buffer_scale,
+		.preferred_buffer_transform = popup_surface_preferred_buffer_transform,
+};
 
 static void draw_rounded_rectangle(cairo_t *cr,
 																	 double x,
@@ -56,8 +109,9 @@ int im_panel_update(struct wlpinyin_state *state) {
 	int bufptr = 0;
 
 	im_preedit_t preedit = im_engine_preedit(state->engine);
-	zwp_input_method_v2_set_preedit_string(state->input_method, preedit.text,
-																				 preedit.begin, preedit.end);
+	zwp_input_method_v2_set_preedit_string(
+			state->input_method, im_text_or_empty(preedit.text), preedit.begin,
+			preedit.end);
 
 	im_context_t ctx = im_engine_context(state->engine);
 
@@ -134,11 +188,24 @@ int im_panel_update(struct wlpinyin_state *state) {
 	for (int i = 0; i < ctx.page_size; i++)
 		panel_width += row_width[i];
 	int panel_height = row_height * MAX(1, real_end_row - start_row);
+	int scale = im_popup_effective_scale(state->popup_scale);
+	int buffer_width = im_popup_scaled_size(panel_width, scale);
+	int buffer_height = im_popup_scaled_size(panel_height, scale);
 
 	/* Resize buffer if needed */
 	int panel_stride =
-			cairo_format_stride_for_width(CAIRO_FORMAT_ARGB32, panel_width);
-	int buffer_newsz = panel_stride * panel_height;
+			cairo_format_stride_for_width(CAIRO_FORMAT_ARGB32, buffer_width);
+	if (panel_stride < 0) {
+		wlpinyin_err("invalid cairo stride for popup width %d", buffer_width);
+		state->frame_callback_done = true;
+		return -1;
+	}
+	if (buffer_height > 0 && panel_stride > INT_MAX / buffer_height) {
+		wlpinyin_err("popup buffer too large: %dx%d", buffer_width, buffer_height);
+		state->frame_callback_done = true;
+		return -1;
+	}
+	int buffer_newsz = panel_stride * buffer_height;
 
 	if (state->shm_size < buffer_newsz) {
 		if (state->popup_data) {
@@ -168,14 +235,15 @@ int im_panel_update(struct wlpinyin_state *state) {
 	if (state->shm_buffer)
 		wl_buffer_destroy(state->shm_buffer);
 	state->shm_buffer =
-			wl_shm_pool_create_buffer(state->shm_pool, 0, panel_width, panel_height,
+			wl_shm_pool_create_buffer(state->shm_pool, 0, buffer_width, buffer_height,
 																panel_stride, WL_SHM_FORMAT_ARGB8888);
 
 	/* Create Cairo surface */
 	cairo_surface_t *cairo_surface = cairo_image_surface_create_for_data(
-			state->popup_data, CAIRO_FORMAT_ARGB32, panel_width, panel_height,
+			state->popup_data, CAIRO_FORMAT_ARGB32, buffer_width, buffer_height,
 			panel_stride);
 	cairo_t *cr = cairo_create(cairo_surface);
+	cairo_scale(cr, scale, scale);
 
 	/* Clear */
 	cairo_set_source_rgba(cr, 0, 0, 0, 0);
@@ -227,6 +295,8 @@ int im_panel_update(struct wlpinyin_state *state) {
 	cairo_surface_destroy(cairo_surface);
 
 	/* Commit to wayland */
+	if (state->compositor_version >= WL_SURFACE_SET_BUFFER_SCALE_SINCE_VERSION)
+		wl_surface_set_buffer_scale(state->popup_surface, scale);
 	wl_surface_attach(state->popup_surface, state->shm_buffer, 0, 0);
 	wl_surface_damage(state->popup_surface, 0, 0, panel_width, panel_height);
 	wl_surface_commit(state->popup_surface);
@@ -246,6 +316,8 @@ int im_panel_init(struct wlpinyin_state *state) {
 		wlpinyin_err("failed to create popup surface");
 		return -1;
 	}
+	state->popup_scale = 1;
+	wl_surface_add_listener(state->popup_surface, &popup_surface_listener, state);
 
 	state->popup_surface_v2 = zwp_input_method_v2_get_input_popup_surface(
 			state->input_method, state->popup_surface);

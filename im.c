@@ -13,6 +13,7 @@
 
 struct wlpinyin_key {
 	xkb_keysym_t xkb_keysym;
+	xkb_keycode_t xkb_keycode;
 	uint32_t keycode;
 	bool pressed;
 };
@@ -26,6 +27,50 @@ static int32_t get_miliseconds() {
 static void im_send_text(struct wlpinyin_state *state, const char *text) {
 	wlpinyin_dbg("upd_text: %s", text ? text : "");
 	zwp_input_method_v2_commit_string(state->input_method, text ? text : "");
+}
+
+static void im_reset_content_type(struct wlpinyin_state *state) {
+	state->content_purpose = ZWP_TEXT_INPUT_V3_CONTENT_PURPOSE_NORMAL;
+}
+
+static bool im_commit_control_text(struct wlpinyin_state *state,
+																	 xkb_keysym_t keysym) {
+	if (!im_should_commit_control_for_key(keysym, state->content_purpose))
+		return false;
+
+	const char *control = im_terminal_control_for_key(keysym);
+	if (!control)
+		return false;
+
+	wlpinyin_dbg("control_text: keysym %02x, len %zu, purpose %u", keysym,
+							 strlen(control), state->content_purpose);
+	zwp_input_method_v2_commit_string(state->input_method, control);
+	zwp_input_method_v2_commit(state->input_method, state->im_serial);
+	return true;
+}
+
+static bool im_key_was_forwarded(struct wlpinyin_state *state,
+																 uint32_t keycode) {
+	return im_keycode_is_tracked(keycode) && state->forwarded_keys[keycode];
+}
+
+static void im_forward_key(struct wlpinyin_state *state,
+													 struct wlpinyin_key *keynode) {
+#ifndef NDEBUG
+	char buf[512] = {0};
+	xkb_keysym_get_name(keynode->xkb_keysym, buf, sizeof buf);
+	wlpinyin_dbg("send_key[%s]: keycode %u, xkb_keycode %u, keysym %02x, %s",
+							 buf, keynode->keycode, keynode->xkb_keycode,
+							 keynode->xkb_keysym, keynode->pressed ? "pressed" : "released");
+#endif
+
+	zwp_virtual_keyboard_v1_key(
+			state->virtual_keyboard, get_miliseconds(), keynode->keycode,
+			keynode->pressed ? WL_KEYBOARD_KEY_STATE_PRESSED
+											 : WL_KEYBOARD_KEY_STATE_RELEASED);
+
+	if (im_keycode_is_tracked(keynode->keycode))
+		state->forwarded_keys[keynode->keycode] = keynode->pressed;
 }
 
 static void noop() {}
@@ -43,11 +88,14 @@ static void im_handle_key(struct wlpinyin_state *state,
 		}
 
 		if (!handled && keynode->pressed) {
-			handled =
-					im_engine_key(state->engine, keynode->xkb_keysym,
-												xkb_state_serialize_mods(
-														state->xkb_state, XKB_STATE_MODS_EFFECTIVE |
-																									XKB_STATE_LAYOUT_EFFECTIVE));
+			if (!im_key_should_bypass_rime(keynode->xkb_keysym,
+																		 im_engine_has_input(state->engine))) {
+				handled =
+						im_engine_key(state->engine, keynode->xkb_keysym,
+													xkb_state_serialize_mods(
+															state->xkb_state, XKB_STATE_MODS_EFFECTIVE |
+																										XKB_STATE_LAYOUT_EFFECTIVE));
+			}
 		}
 
 		if (handled) {
@@ -59,18 +107,18 @@ static void im_handle_key(struct wlpinyin_state *state,
 		}
 	}
 
-	if (!handled) {
-#ifndef NDEBUG
-		char buf[512] = {0};
-		xkb_keysym_get_name(keynode->xkb_keysym, buf, sizeof buf);
-		wlpinyin_dbg("send_key[%s]: keysym %02x, %s", buf, keynode->xkb_keysym,
-								 keynode->pressed ? "pressed" : "released");
-#endif
+	if (keynode->pressed && !handled && state->im_activated &&
+			state->im_enabled) {
+		handled = im_commit_control_text(state, keynode->xkb_keysym);
+	}
 
-		zwp_virtual_keyboard_v1_key(
-				state->virtual_keyboard, get_miliseconds(), keynode->keycode,
-				keynode->pressed ? WL_KEYBOARD_KEY_STATE_PRESSED
-												 : WL_KEYBOARD_KEY_STATE_RELEASED);
+	if (keynode->pressed) {
+		if (!handled)
+			im_forward_key(state, keynode);
+		else if (im_keycode_is_tracked(keynode->keycode))
+			state->forwarded_keys[keynode->keycode] = false;
+	} else if (im_key_was_forwarded(state, keynode->keycode)) {
+		im_forward_key(state, keynode);
 	}
 
 	wl_display_flush(state->display);
@@ -121,19 +169,22 @@ static void handle_key(
 
 	struct wlpinyin_key keynode = {0};
 	keynode.keycode = key;
-	xkb_keycode_t xkb_keycode = key + 8;
-	keynode.xkb_keysym = xkb_state_key_get_one_sym(state->xkb_state, xkb_keycode);
+	keynode.xkb_keycode = key + 8;
+	keynode.xkb_keysym =
+			xkb_state_key_get_one_sym(state->xkb_state, keynode.xkb_keycode);
 	keynode.pressed = kstate == WL_KEYBOARD_KEY_STATE_PRESSED;
 
-	xkb_state_update_key(state->xkb_state, xkb_keycode,
+	xkb_state_update_key(state->xkb_state, keynode.xkb_keycode,
 											 keynode.pressed ? XKB_KEY_DOWN : XKB_KEY_UP);
 
 #ifndef NDEBUG
 	char buf[512] = {0};
 	xkb_keysym_get_name(keynode.xkb_keysym, buf, sizeof buf);
-	wlpinyin_dbg("event_key[%s]: keysym %02x, serial %d, time %d, %s", buf,
-							 keynode.xkb_keysym, serial, time,
-							 keynode.pressed ? "pressed" : "released");
+	wlpinyin_dbg(
+			"event_key[%s]: keycode %u, xkb_keycode %u, keysym %02x, serial %d, "
+			"time %d, %s",
+			buf, keynode.keycode, keynode.xkb_keycode, keynode.xkb_keysym, serial,
+			time, keynode.pressed ? "pressed" : "released");
 #endif
 
 	// handle it
@@ -160,12 +211,24 @@ static void handle_modifiers(
 																		mods_latched, mods_locked, group);
 }
 
+static void handle_content_type(void *data,
+																struct zwp_input_method_v2 *zwp_input_method_v2,
+																uint32_t hint,
+																uint32_t purpose) {
+	UNUSED(zwp_input_method_v2);
+	UNUSED(hint);
+	struct wlpinyin_state *state = data;
+	state->content_purpose = purpose;
+	wlpinyin_dbg("ev_content_type: purpose %u", purpose);
+}
+
 static void handle_deactivate(void *data,
 															struct zwp_input_method_v2 *zwp_input_method_v2) {
 	UNUSED(zwp_input_method_v2);
 	struct wlpinyin_state *state = data;
 	wlpinyin_dbg("ev_deactive");
 	im_engine_reset(state->engine);
+	im_reset_content_type(state);
 	im_panel_update(state);
 	state->im_activated = false;
 	state->im_enabled = false;
@@ -177,6 +240,7 @@ static void handle_activate(void *data,
 	struct wlpinyin_state *state = data;
 	wlpinyin_dbg("ev_active");
 	im_engine_reset(state->engine);
+	im_reset_content_type(state);
 	im_panel_update(state);
 	state->im_activated = true;
 	state->im_enabled = true;
@@ -205,8 +269,13 @@ static void handle_global(void *data,
 	} else if (strcmp(interface, wl_seat_interface.name) == 0) {
 		state->seat = wl_registry_bind(registry, name, &wl_seat_interface, version);
 	} else if (strcmp(interface, wl_compositor_interface.name) == 0) {
-		state->compositor =
-				wl_registry_bind(registry, name, &wl_compositor_interface, version);
+		state->compositor_version = version;
+		if (state->compositor_version >
+				WL_SURFACE_PREFERRED_BUFFER_SCALE_SINCE_VERSION)
+			state->compositor_version =
+					WL_SURFACE_PREFERRED_BUFFER_SCALE_SINCE_VERSION;
+		state->compositor = wl_registry_bind(
+				registry, name, &wl_compositor_interface, state->compositor_version);
 	} else if (strcmp(interface, wl_shm_interface.name) == 0) {
 		state->wl_shm =
 				wl_registry_bind(registry, name, &wl_shm_interface, version);
@@ -285,8 +354,7 @@ struct wlpinyin_state *im_setup(int signalfd, struct wl_display *display) {
 																		const char *, uint32_t, uint32_t))noop,
 			.text_change_cause =
 					(void (*)(void *, struct zwp_input_method_v2 *, uint32_t))noop,
-			.content_type = (void (*)(void *, struct zwp_input_method_v2 *, uint32_t,
-																uint32_t))noop,
+			.content_type = handle_content_type,
 			.done = handle_done,
 			.unavailable = (void (*)(void *, struct zwp_input_method_v2 *))noop,
 	};

@@ -8,7 +8,10 @@
 #include <xkbcommon/xkbcommon.h>
 
 #include "input-method-unstable-v2-client-protocol.h"
+#include "text-input-unstable-v3-client-protocol.h"
 #include "virtual-keyboard-unstable-v1-client-protocol.h"
+
+#define WLPINYIN_KEYCODE_TRACK_MAX 768
 
 #ifdef ENABLE_POPUP
 #include <pango/pango.h>
@@ -28,11 +31,13 @@ struct wlpinyin_state {
 	struct zwp_input_method_manager_v2 *input_method_manager;
 	struct zwp_virtual_keyboard_manager_v1 *virtual_keyboard_manager;
 	struct wl_compositor *compositor;
+	uint32_t compositor_version;
 	struct wl_shm *wl_shm;
 
 #ifdef ENABLE_POPUP
 	struct wl_surface *popup_surface;
 	struct zwp_input_popup_surface_v2 *popup_surface_v2;
+	int popup_scale;
 	int shm_pool_fd;
 	struct wl_shm_pool *shm_pool;
 	int shm_size;
@@ -59,6 +64,8 @@ struct wlpinyin_state {
 	char *xkb_keymap_string;
 	struct xkb_keymap *xkb_keymap;
 	struct xkb_state *xkb_state;
+	bool forwarded_keys[WLPINYIN_KEYCODE_TRACK_MAX];
+	uint32_t content_purpose;
 
 	int rpc_fd;
 	char *rpc_socket_path;
@@ -96,6 +103,20 @@ void im_engine_toggle(struct engine *);
 void im_engine_reset(struct engine *);
 bool im_engine_get_ascii_mode(struct engine *);
 void im_engine_set_ascii_mode(struct engine *, bool ascii_mode);
+bool im_engine_has_input(struct engine *);
+
+int im_popup_effective_scale(int scale);
+int im_popup_scaled_size(int logical_size, int scale);
+void im_preedit_clear(im_preedit_t *preedit);
+void im_context_clear(im_context_t *ctx);
+bool im_preedit_has_text(const char *text);
+bool im_key_should_bypass_rime(xkb_keysym_t keysym, bool composing);
+bool im_keycode_is_tracked(uint32_t keycode);
+const char *im_terminal_control_for_key(xkb_keysym_t keysym);
+bool im_should_commit_control_for_key(xkb_keysym_t keysym,
+																			uint32_t content_purpose);
+const char *im_text_or_empty(const char *text);
+xkb_mod_mask_t im_rime_filter_mods(xkb_mod_mask_t mods);
 
 int im_panel_init(struct wlpinyin_state *);
 int im_panel_update(struct wlpinyin_state *);
